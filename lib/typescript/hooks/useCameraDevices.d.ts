@@ -1,4 +1,4 @@
-import type { CameraDevice } from '../types/CameraDevice';
+import type { CameraDevice } from "../types/CameraDevice";
 /**
  * Get all available Camera Devices this phone has.
  *
