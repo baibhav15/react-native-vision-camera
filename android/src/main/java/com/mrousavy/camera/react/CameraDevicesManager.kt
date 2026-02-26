@@ -18,6 +18,7 @@ import com.mrousavy.camera.core.extensions.await
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
 
 class CameraDevicesManager(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
   companion object {
@@ -60,6 +61,8 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   override fun getName(): String = TAG
 
+  private val initDeferred = CompletableDeferred<Unit>()
+
   // Init cameraProvider + manager as early as possible
   init {
     coroutineScope.launch {
@@ -69,8 +72,10 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
         Log.i(TAG, "Initializing ExtensionsManager...")
         extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
         Log.i(TAG, "Successfully initialized!")
+        initDeferred.complete(Unit)
       } catch (error: Throwable) {
         Log.e(TAG, "Failed to initialize ProcessCameraProvider/ExtensionsManager! Error: ${error.message}", error)
+        initDeferred.completeExceptionally(error)
       }
     }
   }
@@ -79,7 +84,11 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   override fun initialize() {
     super.initialize()
     cameraManager.registerAvailabilityCallback(callback, null)
-    sendAvailableDevicesChangedEvent()
+    //sendAvailableDevicesChangedEvent()
+    coroutineScope.launch {
+      initDeferred.await()
+      sendAvailableDevicesChangedEvent()
+    }
   }
 
   override fun invalidate() {
@@ -100,6 +109,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   }
 
   fun sendAvailableDevicesChangedEvent() {
+    if (!reactContext.hasActiveReactInstance()) return
     val eventEmitter = reactContext.getJSModule(RCTDeviceEventEmitter::class.java)
     val devices = getDevicesJson()
     eventEmitter.emit("CameraDevicesChanged", devices)
@@ -125,16 +135,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   fun removeListeners(count: Int) {}
 
   private suspend fun ensureInitialized() {
-    if (cameraProvider != null && extensionsManager != null) return
-
-    // Try init again (idempotent enough for this use-case)
-    if (cameraProvider == null) {
-      cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
-    }
-    if (extensionsManager == null && cameraProvider != null) {
-      extensionsManager =
-        ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
-    }
+    initDeferred.await()
   }
 
   /**
