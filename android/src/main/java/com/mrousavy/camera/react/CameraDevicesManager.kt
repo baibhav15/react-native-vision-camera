@@ -110,9 +110,14 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   fun sendAvailableDevicesChangedEvent() {
     if (!reactContext.hasActiveReactInstance()) return
-    val eventEmitter = reactContext.getJSModule(RCTDeviceEventEmitter::class.java)
-    val devices = getDevicesJson()
-    eventEmitter.emit("CameraDevicesChanged", devices)
+    try {
+        val eventEmitter = reactContext.getJSModule(RCTDeviceEventEmitter::class.java)
+        
+        val devices = getDevicesJson()
+        eventEmitter.emit("CameraDevicesChanged", devices)
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not emit CameraDevicesChanged: React bridge not ready.")
+    }
   }
 
   override fun getConstants(): MutableMap<String, Any?> {
