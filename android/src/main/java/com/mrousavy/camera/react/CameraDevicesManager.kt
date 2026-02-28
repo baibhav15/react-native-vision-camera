@@ -141,8 +141,6 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   fun removeListeners(count: Int) {}
 
   private suspend fun ensureInitialized() {
-    if (cameraProvider != null && extensionsManager != null) return
-
     // Try init again (idempotent enough for this use-case)
     if (cameraProvider == null) {
       cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
