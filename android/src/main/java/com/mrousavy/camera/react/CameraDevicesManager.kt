@@ -29,6 +29,8 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   private val cameraManager = reactContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
   private var cameraProvider: ProcessCameraProvider? = null
   private var extensionsManager: ExtensionsManager? = null
+  private val camerasReadyDeferred = CompletableDeferred<Unit>()
+
 
   private val callback = object : CameraManager.AvailabilityCallback() {
     private var deviceIds = cameraManager.cameraIdList.toMutableList()
@@ -46,8 +48,11 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
       Log.i(TAG, "Camera #$cameraId is now available.")
       if (!deviceIds.contains(cameraId)) {
         deviceIds.add(cameraId)
-        sendAvailableDevicesChangedEvent()
       }
+      if (!camerasReadyDeferred.isCompleted && (cameraProvider?.availableCameraInfos?.isNotEmpty() == true)) {
+        camerasReadyDeferred.complete(Unit)
+      }
+      sendAvailableDevicesChangedEvent()
     }
 
     override fun onCameraUnavailable(cameraId: String) {
@@ -61,8 +66,6 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   override fun getName(): String = TAG
 
-  private val initDeferred = CompletableDeferred<Unit>()
-
   // Init cameraProvider + manager as early as possible
   init {
     coroutineScope.launch {
@@ -72,10 +75,12 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
         Log.i(TAG, "Initializing ExtensionsManager...")
         extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
         Log.i(TAG, "Successfully initialized!")
-        initDeferred.complete(Unit)
+        if (cameraProvider!!.availableCameraInfos.isNotEmpty()) {
+          camerasReadyDeferred.complete(Unit)
+        }
       } catch (error: Throwable) {
         Log.e(TAG, "Failed to initialize ProcessCameraProvider/ExtensionsManager! Error: ${error.message}", error)
-        initDeferred.completeExceptionally(error)
+        camerasReadyDeferred.completeExceptionally(error)
       }
     }
   }
@@ -84,11 +89,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   override fun initialize() {
     super.initialize()
     cameraManager.registerAvailabilityCallback(callback, null)
-    //sendAvailableDevicesChangedEvent()
-    coroutineScope.launch {
-      initDeferred.await()
-      sendAvailableDevicesChangedEvent()
-    }
+    sendAvailableDevicesChangedEvent()
   }
 
   override fun invalidate() {
@@ -140,7 +141,17 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   fun removeListeners(count: Int) {}
 
   private suspend fun ensureInitialized() {
-    initDeferred.await()
+    if (cameraProvider != null && extensionsManager != null) return
+
+    // Try init again (idempotent enough for this use-case)
+    if (cameraProvider == null) {
+      cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
+    }
+    if (extensionsManager == null && cameraProvider != null) {
+      extensionsManager =
+        ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
+    }
+    camerasReadyDeferred.await()
   }
 
   /**
