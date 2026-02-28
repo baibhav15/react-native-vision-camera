@@ -78,6 +78,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
         if (cameraProvider!!.availableCameraInfos.isNotEmpty()) {
           camerasReadyDeferred.complete(Unit)
         }
+        sendAvailableDevicesChangedEvent()
       } catch (error: Throwable) {
         Log.e(TAG, "Failed to initialize ProcessCameraProvider/ExtensionsManager! Error: ${error.message}", error)
         camerasReadyDeferred.completeExceptionally(error)
