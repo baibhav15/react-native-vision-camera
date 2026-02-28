@@ -36,7 +36,7 @@ import kotlin.math.sqrt
 
 @SuppressLint("RestrictedApi")
 @Suppress("FoldInitializerAndIfToElvis")
-class CameraDeviceDetails(private val cameraInfo: CameraInfo, extensionsManager: ExtensionsManager) {
+class CameraDeviceDetails(private val cameraInfo: CameraInfo, extensionsManager: ExtensionsManager?) {
   companion object {
     private const val TAG = "CameraDeviceDetails"
   }
@@ -76,8 +76,11 @@ class CameraDeviceDetails(private val cameraInfo: CameraInfo, extensionsManager:
   private val maxFieldOfView = getMaxFieldOfView()
 
   // Extensions
-  private val supportsHdrExtension = extensionsManager.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.HDR)
-  private val supportsLowLightBoostExtension = extensionsManager.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.NIGHT)
+  private val supportsHdrExtension =
+    extensionsManager?.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.HDR) ?: false
+
+  private val supportsLowLightBoostExtension =
+    extensionsManager?.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.NIGHT) ?: false
 
   fun toMap(): ReadableMap {
     val deviceTypes = getDeviceTypes()

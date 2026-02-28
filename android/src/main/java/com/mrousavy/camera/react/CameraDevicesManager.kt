@@ -3,22 +3,18 @@ package com.mrousavy.camera.react
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import android.util.Log
-import androidx.camera.extensions.ExtensionsManager
+import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
-import com.facebook.react.bridge.Arguments
-import com.facebook.react.bridge.Promise
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
-import com.facebook.react.bridge.ReadableArray
+import androidx.camera.extensions.ExtensionsManager
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
 import com.mrousavy.camera.core.CameraDeviceDetails
 import com.mrousavy.camera.core.CameraQueues
 import com.mrousavy.camera.core.extensions.await
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.*
+import android.annotation.SuppressLint
+
 
 class CameraDevicesManager(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
   companion object {
@@ -27,8 +23,8 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   private val executor = CameraQueues.cameraExecutor
   private val coroutineScope = CoroutineScope(executor.asCoroutineDispatcher())
   private val cameraManager = reactContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-  private var cameraProvider: ProcessCameraProvider? = null
-  private var extensionsManager: ExtensionsManager? = null
+  @Volatile private var cameraProvider: ProcessCameraProvider? = null
+  @Volatile private var extensionsManager: ExtensionsManager? = null
   private val camerasReadyDeferred = CompletableDeferred<Unit>()
 
 
@@ -46,13 +42,13 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
     override fun onCameraAvailable(cameraId: String) {
       Log.i(TAG, "Camera #$cameraId is now available.")
-      if (!deviceIds.contains(cameraId)) {
-        deviceIds.add(cameraId)
-      }
       if (!camerasReadyDeferred.isCompleted && (cameraProvider?.availableCameraInfos?.isNotEmpty() == true)) {
         camerasReadyDeferred.complete(Unit)
       }
-      sendAvailableDevicesChangedEvent()
+      if (!deviceIds.contains(cameraId)) {
+        deviceIds.add(cameraId)
+        sendAvailableDevicesChangedEvent()
+      }
     }
 
     override fun onCameraUnavailable(cameraId: String) {
@@ -73,17 +69,39 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
         Log.i(TAG, "Initializing ProcessCameraProvider...")
         cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
         Log.i(TAG, "Initializing ExtensionsManager...")
-        extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
-        Log.i(TAG, "Successfully initialized!")
-        if (cameraProvider!!.availableCameraInfos.isNotEmpty()) {
-          camerasReadyDeferred.complete(Unit)
+
+        // ExtensionsManager is OPTIONAL — failure here should not block camera enumeration
+        try {
+          extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
+          Log.i(TAG, "ExtensionsManager initialized.")
+        } catch (e: Throwable) {
+          Log.w(TAG, "ExtensionsManager unavailable: ${e.message}")
+          extensionsManager = null
         }
+        // Wait until CameraX has populated availableCameraInfos
+        waitForCameras()
+        if (!camerasReadyDeferred.isCompleted)
+          camerasReadyDeferred.complete(Unit)
         sendAvailableDevicesChangedEvent()
-      } catch (error: Throwable) {
-        Log.e(TAG, "Failed to initialize ProcessCameraProvider/ExtensionsManager! Error: ${error.message}", error)
-        camerasReadyDeferred.completeExceptionally(error)
+      } catch (e: Throwable) {
+        Log.e(TAG, "Camera initialization failed: ${e.message}", e)
+        // Always complete to avoid blocking ensureInitialized indefinitely
+        if (!camerasReadyDeferred.isCompleted)
+          camerasReadyDeferred.complete(Unit)
       }
     }
+  }
+
+  private suspend fun waitForCameras() {
+    var attempts = 0
+    while (attempts < 20) {
+      val count = cameraProvider?.availableCameraInfos?.size ?: 0
+      Log.d(TAG, "availableCameraInfos size: $count (attempt $attempts)")
+      if (count > 0) return
+      delay(250)
+      attempts++
+    }
+    Log.w(TAG, "waitForCameras timed out — proceeding with whatever is available")
   }
 
   // Note: initialize() will be called after getConstants on new arch!
@@ -98,27 +116,50 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
     super.invalidate()
   }
 
+  @SuppressLint("UnsafeOptInUsageError")
   private fun getDevicesJson(): ReadableArray {
     val devices = Arguments.createArray()
-    val cameraProvider = cameraProvider ?: return devices
-    val extensionsManager = extensionsManager ?: return devices
+    val provider = cameraProvider ?: return devices
 
-    cameraProvider.availableCameraInfos.forEach { cameraInfo ->
-      val device = CameraDeviceDetails(cameraInfo, extensionsManager)
-      devices.pushMap(device.toMap())
+    provider.availableCameraInfos.forEach { cameraInfo ->
+      try {
+        val camera2Info = Camera2CameraInfo.from(cameraInfo)
+        val cameraId = camera2Info.cameraId
+
+        // Skip if physically not accessible
+        try {
+          cameraManager.getCameraCharacteristics(cameraId)
+        } catch (_: Throwable) {
+          Log.w(TAG, "Skipping disconnected camera: $cameraId")
+          return@forEach
+        }        
+
+        val deviceDetails = CameraDeviceDetails(cameraInfo, extensionsManager)
+        devices.pushMap(deviceDetails.toMap())
+      } catch (e: Throwable) {
+        Log.w(TAG, "Error enumerating camera: ${e.message}")
+      }
     }
     return devices
   }
 
-  fun sendAvailableDevicesChangedEvent() {
-    if (!reactContext.hasActiveReactInstance()) return
+
+  fun sendAvailableDevicesChangedEvent(retryCount: Int = 0) {
+    if (!reactContext.hasActiveReactInstance()) {
+      if (retryCount >= 10) return
+      coroutineScope.launch {
+        delay(500)
+        sendAvailableDevicesChangedEvent(retryCount + 1)
+      }
+      return
+    }
     try {
-        val eventEmitter = reactContext.getJSModule(RCTDeviceEventEmitter::class.java)
-        
-        val devices = getDevicesJson()
-        eventEmitter.emit("CameraDevicesChanged", devices)
+      val devices = getDevicesJson()
+      if (devices.size() == 0 && !camerasReadyDeferred.isCompleted) return
+      val emitter = reactContext.getJSModule(RCTDeviceEventEmitter::class.java)
+      emitter.emit("CameraDevicesChanged", devices)
     } catch (e: Exception) {
-        Log.w(TAG, "Could not emit CameraDevicesChanged: React bridge not ready.")
+      Log.w(TAG, "Emit failed: ${e.message}")
     }
   }
 
@@ -142,22 +183,28 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   fun removeListeners(count: Int) {}
 
   private suspend fun ensureInitialized() {
-    // Try init again (idempotent enough for this use-case)
+    camerasReadyDeferred.await()
     if (cameraProvider == null) {
-      cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
+      try {
+        cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
+      } catch (e: Throwable) {
+        Log.w(TAG, "ensureInitialized: failed to reinit ProcessCameraProvider: ${e.message}")
+        // leave provider null — callers will get empty list but won't hang
+      }
     }
     if (extensionsManager == null && cameraProvider != null) {
-      extensionsManager =
-        ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
+      try {
+        extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
+        Log.i(TAG, "ensureInitialized: ExtensionsManager re-initialized.")
+      } catch (_: Throwable) {
+        // ignore — extensions are optional
+      }
     }
-    camerasReadyDeferred.await()
+    if (cameraProvider?.availableCameraInfos?.isEmpty() == true) {
+        waitForCameras() 
+    }
   }
 
-  /**
-   * Exposed to JS: returns current available camera devices at call time.
-   * JS usage:
-   *   const devices = await NativeModules.CameraDevices.getAvailableDeviceManually()
-   */
   @ReactMethod
   fun getAvailableDeviceManually(promise: Promise) {
     coroutineScope.launch {
