@@ -1,1 +1,1 @@
-{"version":3,"file":"CameraDevices.d.ts","sourceRoot":"","sources":["../../src/CameraDevices.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,YAAY,EAAE,MAAM,sBAAsB,CAAC;AAkCzD,eAAO,MAAM,aAAa;;;;gDAcZ,CAAC,UAAU,EAAE,YAAY,EAAE,KAAK,IAAI;CAIjD,CAAC"}
+{"version":3,"file":"CameraDevices.d.ts","sourceRoot":"","sources":["../../src/CameraDevices.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,YAAY,EAAE,MAAM,sBAAsB,CAAC;AAmCzD,eAAO,MAAM,aAAa;;;;gDAcZ,CAAC,UAAU,EAAE,YAAY,EAAE,KAAK,IAAI;CAIjD,CAAC"}
