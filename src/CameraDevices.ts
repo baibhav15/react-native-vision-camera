@@ -28,6 +28,7 @@ if (isAndroid) {
     setTimeout(() => {
       CameraDevicesManager.getAvailableDeviceManually().then((newDevices) => {
         devices = newDevices;
+        eventEmitter.emit(DEVICES_CHANGED_NAME, newDevices);
       });
     }, 5000);
   }

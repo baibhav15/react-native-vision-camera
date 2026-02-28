@@ -3,7 +3,6 @@ package com.mrousavy.camera.react
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import android.util.Log
-import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -21,15 +20,17 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
     private const val TAG = "CameraDevices"
   }
   private val executor = CameraQueues.cameraExecutor
-  private val coroutineScope = CoroutineScope(executor.asCoroutineDispatcher())
+  private val scopeJob = SupervisorJob()
+  private val coroutineScope = CoroutineScope(scopeJob + executor.asCoroutineDispatcher())
   private val cameraManager = reactContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
   @Volatile private var cameraProvider: ProcessCameraProvider? = null
   @Volatile private var extensionsManager: ExtensionsManager? = null
   private val camerasReadyDeferred = CompletableDeferred<Unit>()
-
+  @Volatile private var isInitDone = false
 
   private val callback = object : CameraManager.AvailabilityCallback() {
     private var deviceIds = cameraManager.cameraIdList.toMutableList()
+    @Volatile private var pendingUpdate: Job? = null
 
     // Check if device is still physically connected (even if onCameraUnavailable() is called)
     private fun isDeviceConnected(cameraId: String): Boolean =
@@ -42,12 +43,16 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
     override fun onCameraAvailable(cameraId: String) {
       Log.i(TAG, "Camera #$cameraId is now available.")
-      if (!camerasReadyDeferred.isCompleted && (cameraProvider?.availableCameraInfos?.isNotEmpty() == true)) {
+      if (isInitDone && !camerasReadyDeferred.isCompleted && (cameraProvider?.availableCameraInfos?.isNotEmpty() == true)) {
         camerasReadyDeferred.complete(Unit)
       }
       if (!deviceIds.contains(cameraId)) {
         deviceIds.add(cameraId)
-        sendAvailableDevicesChangedEvent()
+        pendingUpdate?.cancel()
+        pendingUpdate = coroutineScope.launch {
+          delay(300)
+          sendAvailableDevicesChangedEvent()
+        }
       }
     }
 
@@ -55,7 +60,11 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
       Log.i(TAG, "Camera #$cameraId is now unavailable.")
       if (deviceIds.contains(cameraId) && !isDeviceConnected(cameraId)) {
         deviceIds.remove(cameraId)
-        sendAvailableDevicesChangedEvent()
+        pendingUpdate?.cancel()
+        pendingUpdate = coroutineScope.launch {
+          delay(300)
+          sendAvailableDevicesChangedEvent()
+        }
       }
     }
   }
@@ -78,6 +87,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
           Log.w(TAG, "ExtensionsManager unavailable: ${e.message}")
           extensionsManager = null
         }
+        isInitDone = true
         // Wait until CameraX has populated availableCameraInfos
         waitForCameras()
         if (!camerasReadyDeferred.isCompleted)
@@ -113,6 +123,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   override fun invalidate() {
     cameraManager.unregisterAvailabilityCallback(callback)
+    scopeJob.cancel()
     super.invalidate()
   }
 
@@ -120,8 +131,14 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
   private fun getDevicesJson(): ReadableArray {
     val devices = Arguments.createArray()
     val provider = cameraProvider ?: return devices
+    val cameraInfos = try {
+      provider.availableCameraInfos
+    } catch (_: Throwable) {
+      Log.w(TAG, "getAvailableCameraInfos() threw — camera may be mid-teardown")
+      return devices
+    }
 
-    provider.availableCameraInfos.forEach { cameraInfo ->
+    cameraInfos.forEach { cameraInfo ->
       try {
         val camera2Info = Camera2CameraInfo.from(cameraInfo)
         val cameraId = camera2Info.cameraId
@@ -134,7 +151,12 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
           return@forEach
         }        
 
-        val deviceDetails = CameraDeviceDetails(cameraInfo, extensionsManager)
+        val deviceDetails = try {
+          CameraDeviceDetails(cameraInfo, extensionsManager)
+        } catch (t: Throwable) {
+          Log.w(TAG, "Skipping camera due to device details init failure: ${t.message}")
+          return@forEach
+        }
         devices.pushMap(deviceDetails.toMap())
       } catch (e: Throwable) {
         Log.w(TAG, "Error enumerating camera: ${e.message}")
@@ -146,7 +168,7 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   fun sendAvailableDevicesChangedEvent(retryCount: Int = 0) {
     if (!reactContext.hasActiveReactInstance()) {
-      if (retryCount >= 10) return
+      if (retryCount >= 10 || !scopeJob.isActive) return
       coroutineScope.launch {
         delay(500)
         sendAvailableDevicesChangedEvent(retryCount + 1)
@@ -184,25 +206,6 @@ class CameraDevicesManager(private val reactContext: ReactApplicationContext) : 
 
   private suspend fun ensureInitialized() {
     camerasReadyDeferred.await()
-    if (cameraProvider == null) {
-      try {
-        cameraProvider = ProcessCameraProvider.getInstance(reactContext).await(executor)
-      } catch (e: Throwable) {
-        Log.w(TAG, "ensureInitialized: failed to reinit ProcessCameraProvider: ${e.message}")
-        // leave provider null — callers will get empty list but won't hang
-      }
-    }
-    if (extensionsManager == null && cameraProvider != null) {
-      try {
-        extensionsManager = ExtensionsManager.getInstanceAsync(reactContext, cameraProvider!!).await(executor)
-        Log.i(TAG, "ensureInitialized: ExtensionsManager re-initialized.")
-      } catch (_: Throwable) {
-        // ignore — extensions are optional
-      }
-    }
-    if (cameraProvider?.availableCameraInfos?.isEmpty() == true) {
-        waitForCameras() 
-    }
   }
 
   @ReactMethod

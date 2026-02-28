@@ -76,11 +76,13 @@ class CameraDeviceDetails(private val cameraInfo: CameraInfo, extensionsManager:
   private val maxFieldOfView = getMaxFieldOfView()
 
   // Extensions
-  private val supportsHdrExtension =
+  private val supportsHdrExtension = try {
     extensionsManager?.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.HDR) ?: false
+  } catch (_: Throwable) { false }
 
-  private val supportsLowLightBoostExtension =
+  private val supportsLowLightBoostExtension = try {
     extensionsManager?.isExtensionAvailable(cameraInfo.cameraSelector, ExtensionMode.NIGHT) ?: false
+  } catch (_: Throwable) { false }
 
   fun toMap(): ReadableMap {
     val deviceTypes = getDeviceTypes()
